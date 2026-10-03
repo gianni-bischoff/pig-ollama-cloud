@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -183,6 +185,45 @@ func TestNewCatalog(t *testing.T) {
 	}
 	if got := modelIDs(models); len(got) != 3 {
 		t.Errorf("modelIDs = %v, want 3 ids", got)
+	}
+}
+
+func TestStoredCredential(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PIG_CODING_AGENT_DIR", dir)
+	t.Setenv(envAPIKey, "")
+	t.Setenv(envAPIAlt, "")
+
+	if got := apiKeyConfigured(); got != "" {
+		t.Errorf("apiKeyConfigured with empty store = %q, want empty", got)
+	}
+
+	write := func(content string) {
+		if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(`{"openrouter":{"type":"api_key","key":"other"}}`)
+	if got := storedCredential(); got != "" {
+		t.Errorf("storedCredential for untracked provider = %q, want empty", got)
+	}
+
+	write(`{"ollama-cloud":{"type":"api_key","key":" stored-key "}}`)
+	if got := apiKeyConfigured(); got != "stored-key" {
+		t.Errorf("apiKeyConfigured = %q, want stored key (stored wins over env)", got)
+	}
+	if got := apiKey(); got != "" {
+		t.Errorf("apiKey() must remain env-only, got %q", got)
+	}
+
+	write(`{"ollama-cloud":{"type":"oauth","access":"token"}}`)
+	if got := apiKeyConfigured(); got != "" {
+		t.Errorf("apiKeyConfigured with oauth entry = %q, want empty (only api_key entries used)", got)
+	}
+	t.Setenv(envAPIKey, "env-key")
+	if got := apiKeyConfigured(); got != "env-key" {
+		t.Errorf("apiKeyConfigured with oauth entry + env = %q, want env-key", got)
 	}
 }
 

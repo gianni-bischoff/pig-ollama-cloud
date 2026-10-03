@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -81,6 +82,76 @@ func apiKey() string {
 		}
 	}
 	return ""
+}
+
+// apiKeyConfigured returns the credential for this provider with the
+// documented precedence: the key stored by `pig login ollama-cloud` in the
+// agent's auth.json wins, then the environment variables.
+func apiKeyConfigured() string {
+	if key := storedCredential(); key != "" {
+		return key
+	}
+	return apiKey()
+}
+
+// credentialEntry mirrors the auth.json credential shape PiG writes for an
+// API-key login.
+type credentialEntry struct {
+	Type string `json:"type"`
+	Key  string `json:"key"`
+}
+
+// storedCredential reads providerID's API key from the agent directory's
+// auth.json, or "" when absent.
+//
+// Registration runs before a session exists, so the host cannot resolve the
+// stored credential for us yet. Reading the host's own credential store here
+// (read-only, never written) is what makes the provider appear configured at
+// startup, before the session's handlers run.
+func storedCredential() string {
+	path, err := authJSONPath()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var store map[string]credentialEntry
+	if err := json.Unmarshal(data, &store); err != nil {
+		return ""
+	}
+	entry, ok := store[providerID]
+	if !ok || !strings.EqualFold(entry.Type, "api_key") {
+		return ""
+	}
+	return strings.TrimSpace(entry.Key)
+}
+
+// authJSONPath resolves PiG's agent directory the way the documented
+// environment variables do, and returns the auth.json path inside it.
+func authJSONPath() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv("PIG_CODING_AGENT_DIR")); dir != "" {
+		return filepath.Join(dir, "auth.json"), nil
+	}
+	if os.Getenv("PIG_USE_PI_DIRS") == "1" {
+		if dir := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")); dir != "" {
+			return filepath.Join(dir, "auth.json"), nil
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".pi", "agent", "auth.json"), nil
+	}
+	if pigHome := strings.TrimSpace(os.Getenv("PIG_HOME")); pigHome != "" {
+		return filepath.Join(pigHome, "agent", "auth.json"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".pig", "agent", "auth.json"), nil
 }
 
 // baseURL returns the configured endpoint with a normalized scheme and no
@@ -410,7 +481,8 @@ var updater usageUpdater
 func Extension() *sdk.Extension {
 	e := sdk.New("pig-ollama-cloud")
 
-	models, err := fetchModels(baseURL(), apiKey())
+	key := apiKeyConfigured()
+	models, err := fetchModels(baseURL(), key)
 	if err != nil || len(models) == 0 {
 		models = fallbackModels()
 	}
@@ -418,7 +490,7 @@ func Extension() *sdk.Extension {
 	// registration; runtime re-registration over the wire cannot serialize
 	// the OAuth closures. The flow stays registered until the extension
 	// shuts down or is reloaded.
-	cfg := providerConfig(apiKey(), models)
+	cfg := providerConfig(key, models)
 	cfg["oauth"] = oauthProvider()
 	e.RegisterProvider(providerID, cfg)
 
@@ -439,8 +511,9 @@ func Extension() *sdk.Extension {
 // ollamaCloudStatus implements the ollama_cloud_status tool. The catalog is
 // public, so the model list is reported even without a credential.
 func ollamaCloudStatus(ctx sdk.Context, _ map[string]any) (any, error) {
+	key := apiKeyConfigured()
 	result := map[string]any{
-		"apiKeyConfigured": apiKey() != "",
+		"apiKeyConfigured": key != "",
 		"baseUrl":          baseURL(),
 	}
 
@@ -453,12 +526,6 @@ func ollamaCloudStatus(ctx sdk.Context, _ map[string]any) (any, error) {
 	result["reachable"] = true
 	result["models"] = modelIDs(models)
 
-	key := apiKey()
-	if key == "" {
-		if resolved := ctx.ModelRegistry().GetApiKeyForProvider(providerID); resolved != nil {
-			key = *resolved
-		}
-	}
 	if key != "" {
 		if session, weekly, err := fetchUsage(baseURL(), key); err == nil {
 			result["sessionUsed"] = session
