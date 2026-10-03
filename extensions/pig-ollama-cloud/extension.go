@@ -19,12 +19,14 @@
 package pig_ollama_cloud
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -49,8 +51,9 @@ const (
 	envBaseURL = "OLLAMA_CLOUD_BASE_URL"
 )
 
-// Model catalog defaults. Ollama Cloud does not report per-model limits in
-// /v1/models, so every entry uses conservative values.
+// Catalog defaults. The context window is the conservative fallback for
+// models whose /api/show metadata cannot be fetched; maxTokens is a
+// reasonable output cap for every model.
 const (
 	contextWindow = 131072
 	maxTokens     = 32768
@@ -136,33 +139,130 @@ type openAIModelsResponse struct {
 	} `json:"data"`
 }
 
-// fetchModels queries Ollama Cloud's public /v1/models catalog. key is sent
-// as the bearer when non-empty, but the catalog itself does not require one.
+// fetchModels queries Ollama Cloud's public /v1/models catalog and enriches
+// every entry with per-model metadata from the public /api/show endpoint:
+// the real context window, reasoning, tool, and vision capabilities. key is
+// sent as the bearer when non-empty, but neither endpoint requires one.
 func fetchModels(base, key string) ([]map[string]any, error) {
 	var list openAIModelsResponse
 	if err := getJSON(base+"/v1/models", key, &list); err != nil {
 		return nil, err
 	}
 
-	models := make([]map[string]any, 0, len(list.Data))
+	ids := make([]string, 0, len(list.Data))
 	for _, m := range list.Data {
-		if m.ID == "" {
-			continue
+		if m.ID != "" {
+			ids = append(ids, m.ID)
 		}
-		models = append(models, modelEntry(m.ID))
 	}
-	return models, nil
+	return newCatalog(base, ids), nil
 }
 
-// modelEntry builds one provider model entry.
-func modelEntry(id string) map[string]any {
+// newCatalog builds provider model entries with per-model metadata. Details
+// are fetched concurrently with a bounded worker pool so a full catalog
+// resolves in roughly one request time; per-model failures fall back to the
+// conservative defaults.
+func newCatalog(base string, ids []string) []map[string]any {
+	const workers = 8
+	models := make([]map[string]any, len(ids))
+
+	type job struct {
+		index int
+		id    string
+	}
+	jobs := make(chan job)
+	var wg sync.WaitGroup
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				models[j.index] = modelEntry(j.id, fetchModelDetails(base, j.id))
+			}
+		}()
+	}
+	for i, id := range ids {
+		jobs <- job{index: i, id: id}
+	}
+	close(jobs)
+	wg.Wait()
+	return models
+}
+
+// modelDetails carries the per-model metadata from /api/show.
+type modelDetails struct {
+	ContextWindow int
+	Reasoning     bool
+	ToolCalls     bool
+	Images        bool
+}
+
+// defaultModelDetails is used when /api/show cannot be reached or omits a
+// field. The context window is the smallest one Ollama Cloud currently
+// serves, so the context-usage math never overstates capacity.
+var defaultModelDetails = modelDetails{
+	ContextWindow: contextWindow,
+	Reasoning:     false,
+	ToolCalls:     true,
+	Images:        false,
+}
+
+type ollamaShowResponse struct {
+	Capabilities []string       `json:"capabilities"`
+	ModelInfo    map[string]any `json:"model_info"`
+}
+
+// fetchModelDetails reads one model's metadata from the public /api/show
+// endpoint. Failures return the conservative defaults.
+func fetchModelDetails(base, id string) modelDetails {
+	details := defaultModelDetails
+
+	body, err := json.Marshal(map[string]string{"model": id})
+	if err != nil {
+		return details
+	}
+	resp, err := client.Post(base+"/api/show", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return details
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return details
+	}
+
+	var show ollamaShowResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&show); err != nil {
+		return details
+	}
+
+	for k, v := range show.ModelInfo {
+		if strings.HasSuffix(k, ".context_length") {
+			if n, ok := v.(float64); ok && n > 0 {
+				details.ContextWindow = int(n)
+			}
+		}
+	}
+	details.Reasoning = slices.Contains(show.Capabilities, "thinking")
+	details.ToolCalls = slices.Contains(show.Capabilities, "tools")
+	details.Images = slices.Contains(show.Capabilities, "vision")
+	return details
+}
+
+// modelEntry builds one provider model entry from live metadata.
+func modelEntry(id string, details modelDetails) map[string]any {
+	input := []string{"text"}
+	if details.Images {
+		input = append(input, "image")
+	}
 	return map[string]any{
 		"id":            id,
 		"name":          fmt.Sprintf("%s %s", providerName, id),
-		"contextWindow": contextWindow,
+		"contextWindow": details.ContextWindow,
 		"maxTokens":     maxTokens,
-		"reasoning":     false,
-		"toolCalls":     true,
+		"reasoning":     details.Reasoning,
+		"toolCalls":     details.ToolCalls,
+		"input":         input,
 	}
 }
 
@@ -189,7 +289,7 @@ func fallbackModels() []map[string]any {
 	}
 	models := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
-		models = append(models, modelEntry(id))
+		models = append(models, modelEntry(id, defaultModelDetails))
 	}
 	return models
 }

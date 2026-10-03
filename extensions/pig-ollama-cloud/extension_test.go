@@ -129,6 +129,63 @@ func TestUsageStatusText(t *testing.T) {
 	}
 }
 
+func TestFetchModelDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/show" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var req map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req["model"] == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req["model"] == "unreachable" {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"capabilities":["vision","thinking","completion","tools"],` +
+			`"model_info":{"kimi-k3.context_length":1048576,"general.architecture":"kimik3"}}`))
+	}))
+	defer server.Close()
+
+	details := fetchModelDetails(server.URL, "kimi-k3")
+	if details.ContextWindow != 1048576 || !details.Reasoning || !details.ToolCalls || !details.Images {
+		t.Errorf("fetchModelDetails = %+v, want context 1048576 with reasoning/tools/vision", details)
+	}
+
+	if details := fetchModelDetails(server.URL, "unreachable"); details != defaultModelDetails {
+		t.Errorf("fetchModelDetails on failure = %+v, want defaults", details)
+	}
+
+	entry := modelEntry("kimi-k3", details)
+	if entry["contextWindow"] != 1048576 || entry["reasoning"] != true {
+		t.Errorf("modelEntry = %v, want enriched metadata", entry)
+	}
+}
+
+func TestNewCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"capabilities":["completion","tools"],"model_info":{"m.context_length":262144}}`))
+	}))
+	defer server.Close()
+
+	models := newCatalog(server.URL, []string{"a", "b", "c"})
+	if len(models) != 3 {
+		t.Fatalf("newCatalog returned %d models, want 3", len(models))
+	}
+	for _, m := range models {
+		if m["contextWindow"] != 262144 {
+			t.Errorf("newCatalog entry %v: contextWindow = %v, want 262144", m["id"], m["contextWindow"])
+		}
+	}
+	if got := modelIDs(models); len(got) != 3 {
+		t.Errorf("modelIDs = %v, want 3 ids", got)
+	}
+}
+
 func TestFallbackModels(t *testing.T) {
 	models := fallbackModels()
 	if len(models) == 0 {
