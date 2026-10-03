@@ -1,0 +1,13 @@
+{
+  "name": "pig-ollama-cloud",
+  "version": "1.0.0",
+  "description": "Ollama Cloud provider for PiG: models, interactive login, and live quota display",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gianni-bischoff/pig-ollama-cloud.git"
+  },
+  "pi": {
+    "extensions": ["extensions/*"]
+  }
+}
