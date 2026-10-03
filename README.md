@@ -25,19 +25,37 @@ login and a live quota display in the footer.
 
 ## Install
 
-### Ambient (all sessions)
+Install as a PiG package (recommended):
+
+```bash
+pig install git:https://github.com/gianni-bischoff/pig-ollama-cloud.git
+```
+
+PiG records the package in user settings and loads the `pig-ollama-cloud`
+extension in every session. Git installs run `npm` for the dependency step, so
+Node.js must be on `PATH`. Update with:
+
+```bash
+pig update --extension git:https://github.com/gianni-bischoff/pig-ollama-cloud.git
+# or all packages at once:
+pig update --extensions
+```
+
+Remove it with `pig uninstall git:https://github.com/gianni-bischoff/pig-ollama-cloud.git`.
+
+### Alternatives
+
+Manual ambient install (no package management):
 
 ```bash
 git clone https://github.com/gianni-bischoff/pig-ollama-cloud ~/.pig/agent/extensions/pig-ollama-cloud
 pig install ~/.pig/agent/extensions/pig-ollama-cloud --validate-only
 ```
 
-Restart PiG (or run `/reload`).
-
-### One session at a time
+One session at a time:
 
 ```bash
-pig -e /path/to/pig-ollama-cloud --model ollama-cloud/gpt-oss:120b
+pig -e ./extensions/pig-ollama-cloud --model ollama-cloud/gpt-oss:120b
 ```
 
 ### Piglet
